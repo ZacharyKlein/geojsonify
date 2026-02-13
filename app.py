@@ -240,6 +240,20 @@ if "groups" in st.session_state and st.session_state["groups"]:
                     key=f"dl_{fp.name}",
                 )
 
+# ── Clear ─────────────────────────────────────────────────────────────────
+if "groups" in st.session_state or list(Path("output").glob("*.geojson")):
+    st.divider()
+    if st.button("Clear Results & Delete Output Files", type="secondary", width="stretch"):
+        for key in ("groups", "occurrences", "preview_file"):
+            st.session_state.pop(key, None)
+        output_dir = Path("output")
+        removed = 0
+        for f in output_dir.glob("*.geojson"):
+            f.unlink()
+            removed += 1
+        st.success(f"Cleared results and deleted {removed} output files.")
+        st.rerun()
+
 # ── GeoJSON Preview ───────────────────────────────────────────────────────
 output_dir = Path("output")
 geojson_files = sorted(output_dir.glob("*.geojson")) if output_dir.exists() else []
