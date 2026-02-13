@@ -3,6 +3,7 @@ from pathlib import Path
 
 import geopandas as gpd
 from shapely.geometry import Point, box, shape
+from shapely.validation import make_valid
 
 
 PROPERTIES = [
@@ -78,10 +79,15 @@ def export_polygon_geojson(polygon_features, stage, unit_name, bbox, output_dir=
     for feat in polygon_features:
         try:
             geom = shape(feat["geometry"])
+            if not geom.is_valid:
+                geom = make_valid(geom)
         except Exception:
             continue
 
-        clipped = geom.intersection(clip_box)
+        try:
+            clipped = geom.intersection(clip_box)
+        except Exception:
+            continue
         if clipped.is_empty:
             continue
 

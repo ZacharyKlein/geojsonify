@@ -78,7 +78,7 @@ def fetch_polygons_for_groups(groups, progress_callback=None):
                 progress_callback((idx + 1) / total)
             continue
 
-        # Collect unique lat/lng pairs, sample up to 20
+        # Collect unique lat/lng pairs, sample up to 5
         seen_coords = set()
         sample_points = []
         for occ in occs:
@@ -90,7 +90,7 @@ def fetch_polygons_for_groups(groups, progress_callback=None):
             if key not in seen_coords:
                 seen_coords.add(key)
                 sample_points.append((lat, lng))
-            if len(sample_points) >= 20:
+            if len(sample_points) >= 5:
                 break
 
         seen_ids = set()

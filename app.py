@@ -136,15 +136,8 @@ if fetch_btn:
     with st.spinner("Correlating data..."):
         groups = build_stage_unit_groups(occurrences, units)
 
-    poly_progress = st.progress(0, text="Fetching formation polygons...")
-    matched_polys = fetch_polygons_for_groups(groups, progress_callback=poly_progress.progress)
-    poly_progress.empty()
-    total_polys = sum(len(v) for v in matched_polys.values())
-    st.info(f"Formation polygons: {total_polys} polygons across {len(matched_polys)} groups")
-
     st.session_state["groups"] = groups
     st.session_state["occurrences"] = occurrences
-    st.session_state["matched_polys"] = matched_polys
 
     # Summary table
     st.subheader("Stage × Unit Groups")
@@ -198,9 +191,14 @@ if "groups" in st.session_state and st.session_state["groups"]:
         output_dir = Path("output")
         exported_files = []
         groups = st.session_state["groups"]
-        matched_polys = st.session_state.get("matched_polys", {})
 
-        progress = st.progress(0)
+        # Fetch formation polygons for all groups
+        with st.spinner("Fetching formation polygons (this may take a minute)..."):
+            matched_polys = fetch_polygons_for_groups(groups)
+        total_polys = sum(len(v) for v in matched_polys.values())
+        st.info(f"Formation polygons: {total_polys} polygons across {len(matched_polys)} groups")
+
+        progress = st.progress(0, text="Exporting GeoJSON files...")
         total = len(groups)
         for i, ((stage, unit_name), occs) in enumerate(sorted(groups.items())):
             path = export_geojson(occs, stage, unit_name, output_dir=output_dir)
@@ -213,6 +211,7 @@ if "groups" in st.session_state and st.session_state["groups"]:
                 if poly_path:
                     exported_files.append(poly_path)
             progress.progress((i + 1) / total)
+        progress.empty()
 
         st.success(f"Exported {len(exported_files)} GeoJSON files to `output/`")
 
