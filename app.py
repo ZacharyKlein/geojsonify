@@ -93,7 +93,17 @@ with st.sidebar:
 
     upper_idx = st.selectbox("Upper bound (younger)", options=range(len(interval_options)),
                              format_func=lambda i: interval_options[i], index=0, key="upper_bound")
-    lower_idx = st.selectbox("Lower bound (older)", options=range(len(interval_options)),
+
+    # Filter lower bound options to only include same or older intervals
+    if upper_idx > 0:
+        upper_b_age = intervals[upper_idx - 1]["b_age"]
+        lower_options = [0] + [
+            i + 1 for i, iv in enumerate(intervals) if iv["b_age"] >= upper_b_age
+        ]
+    else:
+        lower_options = list(range(len(interval_options)))
+
+    lower_idx = st.selectbox("Lower bound (older)", options=lower_options,
                              format_func=lambda i: interval_options[i], index=0, key="lower_bound")
 
     age_top = None
