@@ -1,0 +1,6 @@
+intervals.sqlite
+output/
+__pycache__/
+*.pyc
+.env
+.venv/
