@@ -2,7 +2,8 @@ import re
 from pathlib import Path
 
 import geopandas as gpd
-from shapely.geometry import Point
+from shapely.geometry import Point, box, shape
+
 
 PROPERTIES = [
     "occurrence_no",
@@ -25,6 +26,10 @@ def _sanitize_filename(name):
     name = re.sub(r"\s+", "_", name)
     name = re.sub(r"_+", "_", name)
     return name.strip("_")[:200]
+
+
+def _base_filename(stage, unit_name):
+    return f"{_sanitize_filename(stage)}_{_sanitize_filename(unit_name)}"
 
 
 def export_geojson(occurrences, stage, unit_name, output_dir="output"):
@@ -51,7 +56,51 @@ def export_geojson(occurrences, stage, unit_name, output_dir="output"):
         return None
 
     gdf = gpd.GeoDataFrame(rows, crs="EPSG:4326")
-    filename = f"{_sanitize_filename(stage)}_{_sanitize_filename(unit_name)}.geojson"
+    filename = f"{_base_filename(stage, unit_name)}_points.geojson"
+    out_path = output_dir / filename
+    gdf.to_file(str(out_path), driver="GeoJSON")
+    return out_path
+
+
+def export_polygon_geojson(polygon_features, stage, unit_name, bbox, output_dir="output"):
+    """Export polygon features for a stage×unit group, clipped to the bounding box.
+
+    polygon_features: list of GeoJSON feature dicts from the Macrostrat map API.
+    bbox: dict with latmin, latmax, lngmin, lngmax.
+    Returns the output Path, or None if no valid polygons.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    clip_box = box(bbox["lngmin"], bbox["latmin"], bbox["lngmax"], bbox["latmax"])
+
+    rows = []
+    for feat in polygon_features:
+        try:
+            geom = shape(feat["geometry"])
+        except Exception:
+            continue
+
+        clipped = geom.intersection(clip_box)
+        if clipped.is_empty:
+            continue
+
+        props = {}
+        for key in ("map_id", "name", "strat_name", "lith", "descrip",
+                     "t_age", "b_age", "best_int_name", "color"):
+            val = feat.get("properties", {}).get(key)
+            if isinstance(val, (list, dict)):
+                val = str(val)
+            props[key] = val
+        props["stage"] = stage
+        props["unit_name"] = unit_name
+        rows.append({"geometry": clipped, **props})
+
+    if not rows:
+        return None
+
+    gdf = gpd.GeoDataFrame(rows, crs="EPSG:4326")
+    filename = f"{_base_filename(stage, unit_name)}_polygons.geojson"
     out_path = output_dir / filename
     gdf.to_file(str(out_path), driver="GeoJSON")
     return out_path

@@ -11,8 +11,8 @@ from streamlit_folium import st_folium
 from api.macrostrat import fetch_units
 from api.paleobiodb import fetch_occurrences
 from db.intervals import ensure_cache_fresh, get_intervals, init_db
-from processing.correlate import build_stage_unit_groups
-from processing.geojson_export import export_geojson
+from processing.correlate import build_stage_unit_groups, fetch_polygons_for_groups
+from processing.geojson_export import export_geojson, export_polygon_geojson
 
 st.set_page_config(page_title="Macrostrat Toolkit", layout="wide")
 st.title("Macrostrat Toolkit")
@@ -136,8 +136,15 @@ if fetch_btn:
     with st.spinner("Correlating data..."):
         groups = build_stage_unit_groups(occurrences, units)
 
+    poly_progress = st.progress(0, text="Fetching formation polygons...")
+    matched_polys = fetch_polygons_for_groups(groups, progress_callback=poly_progress.progress)
+    poly_progress.empty()
+    total_polys = sum(len(v) for v in matched_polys.values())
+    st.info(f"Formation polygons: {total_polys} polygons across {len(matched_polys)} groups")
+
     st.session_state["groups"] = groups
     st.session_state["occurrences"] = occurrences
+    st.session_state["matched_polys"] = matched_polys
 
     # Summary table
     st.subheader("Stage × Unit Groups")
@@ -191,6 +198,7 @@ if "groups" in st.session_state and st.session_state["groups"]:
         output_dir = Path("output")
         exported_files = []
         groups = st.session_state["groups"]
+        matched_polys = st.session_state.get("matched_polys", {})
 
         progress = st.progress(0)
         total = len(groups)
@@ -198,6 +206,12 @@ if "groups" in st.session_state and st.session_state["groups"]:
             path = export_geojson(occs, stage, unit_name, output_dir=output_dir)
             if path:
                 exported_files.append(path)
+            poly_feats = matched_polys.get((stage, unit_name), [])
+            if poly_feats:
+                poly_path = export_polygon_geojson(
+                    poly_feats, stage, unit_name, bbox, output_dir=output_dir)
+                if poly_path:
+                    exported_files.append(poly_path)
             progress.progress((i + 1) / total)
 
         st.success(f"Exported {len(exported_files)} GeoJSON files to `output/`")
@@ -231,13 +245,19 @@ if "groups" in st.session_state and st.session_state["groups"]:
 output_dir = Path("output")
 geojson_files = sorted(output_dir.glob("*.geojson")) if output_dir.exists() else []
 
-if geojson_files:
+# Show only point files (or legacy files without _points/_polygons suffix) in the selector
+preview_options = [
+    f for f in geojson_files
+    if f.stem.endswith("_points") or not (f.stem.endswith("_points") or f.stem.endswith("_polygons"))
+]
+
+if preview_options:
     st.divider()
     st.subheader("Preview GeoJSON")
 
     selected_file = st.selectbox(
         "Select a GeoJSON file",
-        options=geojson_files,
+        options=preview_options,
         format_func=lambda p: p.name,
         key="geojson_preview_select",
     )
@@ -251,7 +271,18 @@ if geojson_files:
             with open(preview_path, "r") as f:
                 geojson_data = json.load(f)
 
-            # Compute map center from features
+            # Find the matching polygon file
+            poly_path = None
+            poly_data = None
+            if preview_path.stem.endswith("_points"):
+                poly_path = preview_path.with_name(
+                    preview_path.stem.replace("_points", "_polygons") + ".geojson"
+                )
+                if poly_path.exists():
+                    with open(poly_path, "r") as f:
+                        poly_data = json.load(f)
+
+            # Compute map center from point features
             lats, lngs = [], []
             for feat in geojson_data.get("features", []):
                 coords = feat.get("geometry", {}).get("coordinates")
@@ -265,9 +296,28 @@ if geojson_files:
                 map_center = [center_lat, center_lng]
 
             preview = folium.Map(location=map_center, zoom_start=6)
+
+            # Add polygon layer first (underneath points)
+            if poly_data:
+                folium.GeoJson(
+                    poly_data,
+                    name="Formation polygons",
+                    style_function=lambda feat: {
+                        "fillColor": feat.get("properties", {}).get("color", "#3388ff"),
+                        "color": "#333",
+                        "weight": 1.5,
+                        "fillOpacity": 0.3,
+                    },
+                    popup=folium.GeoJsonPopup(
+                        fields=["strat_name", "lith", "best_int_name"],
+                        aliases=["Formation", "Lithology", "Interval"],
+                    ),
+                ).add_to(preview)
+
+            # Add point layer on top
             folium.GeoJson(
                 geojson_data,
-                name=preview_path.name,
+                name="Occurrences",
                 popup=folium.GeoJsonPopup(
                     fields=["accepted_name", "stage", "unit_name"],
                     aliases=["Name", "Stage", "Unit"],
@@ -280,5 +330,10 @@ if geojson_files:
                 ),
             ).add_to(preview)
 
-            st.caption(f"Previewing: **{preview_path.name}** ({len(geojson_data.get('features', []))} features)")
+            folium.LayerControl().add_to(preview)
+
+            caption_parts = [f"**{preview_path.name}** ({len(geojson_data.get('features', []))} points)"]
+            if poly_data:
+                caption_parts.append(f"**{poly_path.name}** ({len(poly_data.get('features', []))} polygons)")
+            st.caption("Previewing: " + " + ".join(caption_parts))
             st_folium(preview, height=500, width=None, key="geojson_preview_map")

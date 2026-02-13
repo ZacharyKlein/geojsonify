@@ -55,3 +55,54 @@ def build_stage_unit_groups(occurrences, macrostrat_units):
         unit_name = assign_unit(occ, macrostrat_units) or "Unassigned"
         groups[(stage, unit_name)].append(occ)
     return dict(groups)
+
+
+def fetch_polygons_for_groups(groups, progress_callback=None):
+    """Fetch map polygons by querying at unique occurrence locations per group.
+
+    For each group, samples up to ~20 unique occurrence locations and queries the
+    Macrostrat map API to find the polygons that underlie those occurrences.
+
+    Returns a dict mapping (stage, unit_name) -> list of GeoJSON feature dicts,
+    deduplicated by map_id within each group.
+    """
+    from api.macrostrat import fetch_map_at_point
+
+    matched = defaultdict(list)
+    group_items = list(groups.items())
+    total = len(group_items)
+
+    for idx, ((stage, unit_name), occs) in enumerate(group_items):
+        if unit_name == "Unassigned":
+            if progress_callback:
+                progress_callback((idx + 1) / total)
+            continue
+
+        # Collect unique lat/lng pairs, sample up to 20
+        seen_coords = set()
+        sample_points = []
+        for occ in occs:
+            lat, lng = occ.get("lat"), occ.get("lng")
+            if lat is None or lng is None:
+                continue
+            lat, lng = float(lat), float(lng)
+            key = (round(lat, 2), round(lng, 2))
+            if key not in seen_coords:
+                seen_coords.add(key)
+                sample_points.append((lat, lng))
+            if len(sample_points) >= 20:
+                break
+
+        seen_ids = set()
+        for lat, lng in sample_points:
+            feats = fetch_map_at_point(lat, lng)
+            for feat in feats:
+                map_id = feat.get("properties", {}).get("map_id")
+                if map_id and map_id not in seen_ids:
+                    seen_ids.add(map_id)
+                    matched[(stage, unit_name)].append(feat)
+
+        if progress_callback:
+            progress_callback((idx + 1) / total)
+
+    return dict(matched)
