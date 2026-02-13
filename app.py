@@ -8,14 +8,14 @@ import streamlit as st
 from folium.plugins import Draw
 from streamlit_folium import st_folium
 
-from api.macrostrat import fetch_units
+from api.macrostrat import fetch_map_polygons, fetch_units
 from api.paleobiodb import fetch_occurrences
 from db.intervals import ensure_cache_fresh, get_intervals, init_db
 from processing.correlate import build_stage_unit_groups, fetch_polygons_for_groups
 from processing.geojson_export import export_geojson, export_polygon_geojson
 
-st.set_page_config(page_title="Macrostrat Toolkit", layout="wide")
-st.title("Macrostrat Toolkit")
+st.set_page_config(page_title="GeoJSONify Macro|Paleo", layout="wide")
+st.title("GeoJSONify Macro|Paleo")
 st.caption("Query Macrostrat & PaleobioDB, export ArcGIS-compatible GeoJSON by stage × unit")
 
 # ── Interval cache ──────────────────────────────────────────────────────────
@@ -117,8 +117,8 @@ with st.sidebar:
         selected_interval_name = intervals[upper_idx - 1]["name"]
 
     st.divider()
-    st.header("Taxa")
-    taxa_input = st.text_area("Comma-separated taxa", value="Dinosauria", height=80)
+    st.header("Taxa (optional)")
+    taxa_input = st.text_area("Comma-separated taxa (leave empty for polygons only)", value="", height=80)
 
     st.divider()
     fetch_btn = st.button("Fetch Data", type="primary", width="stretch")
@@ -128,100 +128,130 @@ bbox = {"latmin": lat_min, "latmax": lat_max, "lngmin": lng_min, "lngmax": lng_m
 
 if fetch_btn:
     taxa_list = [t.strip() for t in taxa_input.split(",") if t.strip()] if taxa_input else []
+    polygons_only = len(taxa_list) == 0
 
-    with st.spinner("Fetching Macrostrat units..."):
-        units = fetch_units(bbox, interval_name=selected_interval_name,
-                            age_top=age_top, age_bottom=age_bottom)
-    st.info(f"Macrostrat: {len(units)} units returned")
+    if polygons_only:
+        # ── Polygons-only mode ─────────────────────────────────────────────
+        with st.spinner("Fetching formation polygons..."):
+            polygon_feats = fetch_map_polygons(bbox, age_top=age_top, age_bottom=age_bottom)
+        st.info(f"Macrostrat map: {len(polygon_feats)} unique polygons returned")
 
-    with st.spinner("Fetching PBDB occurrences..."):
-        occurrences = fetch_occurrences(bbox, taxa=taxa_list,
-                                        age_top=age_top, age_bottom=age_bottom)
-    st.info(f"PaleobioDB: {len(occurrences)} occurrences returned")
+        if not polygon_feats:
+            st.warning("No polygons found. Try adjusting your region or age range.")
+            st.stop()
 
-    if not occurrences:
-        st.warning("No occurrences found. Try adjusting your search parameters.")
-        st.stop()
+        st.session_state["polygon_feats"] = polygon_feats
+        st.session_state["groups"] = None
+        st.session_state.pop("occurrences", None)
 
-    with st.spinner("Correlating data..."):
-        groups = build_stage_unit_groups(occurrences, units)
+    else:
+        # ── Taxa mode (points + polygons) ──────────────────────────────────
+        with st.spinner("Fetching Macrostrat units..."):
+            units = fetch_units(bbox, interval_name=selected_interval_name,
+                                age_top=age_top, age_bottom=age_bottom)
+        st.info(f"Macrostrat: {len(units)} units returned")
 
-    st.session_state["groups"] = groups
-    st.session_state["occurrences"] = occurrences
+        with st.spinner("Fetching PBDB occurrences..."):
+            occurrences = fetch_occurrences(bbox, taxa=taxa_list,
+                                            age_top=age_top, age_bottom=age_bottom)
+        st.info(f"PaleobioDB: {len(occurrences)} occurrences returned")
 
-    # Summary table
-    st.subheader("Stage × Unit Groups")
-    summary_rows = []
-    for (stage, unit_name), occs in sorted(groups.items()):
-        summary_rows.append({"Stage": stage, "Unit": unit_name, "Occurrences": len(occs)})
-    st.dataframe(summary_rows, width="stretch")
+        if not occurrences:
+            st.warning("No occurrences found. Try adjusting your search parameters.")
+            st.stop()
 
-    # Preview map
-    st.subheader("Occurrence Map")
-    preview_map = folium.Map(location=[center_lat, center_lng], zoom_start=5)
-    folium.Rectangle(
-        bounds=[[lat_min, lng_min], [lat_max, lng_max]],
-        color="blue",
-        fill=False,
-    ).add_to(preview_map)
+        with st.spinner("Correlating data..."):
+            groups = build_stage_unit_groups(occurrences, units)
 
-    # Color by stage
-    stage_colors = {}
-    palette = [
-        "#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231",
-        "#911eb4", "#42d4f4", "#f032e6", "#bfef45", "#fabed4",
-        "#469990", "#dcbeff", "#9A6324", "#800000", "#aaffc3",
-    ]
-    color_idx = 0
-    for (stage, _), occs in groups.items():
-        if stage not in stage_colors:
-            stage_colors[stage] = palette[color_idx % len(palette)]
-            color_idx += 1
-        color = stage_colors[stage]
-        for occ in occs:
-            lng = occ.get("lng")
-            lat = occ.get("lat")
-            if lng is None or lat is None:
-                continue
-            folium.CircleMarker(
-                location=[lat, lng],
-                radius=4,
-                color=color,
-                fill=True,
-                fill_opacity=0.7,
-                popup=f"{occ.get('accepted_name', '?')}<br>{stage}",
-            ).add_to(preview_map)
+        st.session_state["groups"] = groups
+        st.session_state["occurrences"] = occurrences
+        st.session_state.pop("polygon_feats", None)
 
-    st_folium(preview_map, height=500, width=None, key="preview_map")
+        # Summary table
+        st.subheader("Stage × Unit Groups")
+        summary_rows = []
+        for (stage, unit_name), occs in sorted(groups.items()):
+            summary_rows.append({"Stage": stage, "Unit": unit_name, "Occurrences": len(occs)})
+        st.dataframe(summary_rows, width="stretch")
+
+        # Preview map
+        st.subheader("Occurrence Map")
+        preview_map = folium.Map(location=[center_lat, center_lng], zoom_start=5)
+        folium.Rectangle(
+            bounds=[[lat_min, lng_min], [lat_max, lng_max]],
+            color="blue",
+            fill=False,
+        ).add_to(preview_map)
+
+        stage_colors = {}
+        palette = [
+            "#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231",
+            "#911eb4", "#42d4f4", "#f032e6", "#bfef45", "#fabed4",
+            "#469990", "#dcbeff", "#9A6324", "#800000", "#aaffc3",
+        ]
+        color_idx = 0
+        for (stage, _), occs in groups.items():
+            if stage not in stage_colors:
+                stage_colors[stage] = palette[color_idx % len(palette)]
+                color_idx += 1
+            color = stage_colors[stage]
+            for occ in occs:
+                lng = occ.get("lng")
+                lat = occ.get("lat")
+                if lng is None or lat is None:
+                    continue
+                folium.CircleMarker(
+                    location=[lat, lng],
+                    radius=4,
+                    color=color,
+                    fill=True,
+                    fill_opacity=0.7,
+                    popup=f"{occ.get('accepted_name', '?')}<br>{stage}",
+                ).add_to(preview_map)
+
+        st_folium(preview_map, height=500, width=None, key="preview_map")
 
 # ── Export ──────────────────────────────────────────────────────────────────
-if "groups" in st.session_state and st.session_state["groups"]:
+has_groups = st.session_state.get("groups")
+has_polys_only = st.session_state.get("polygon_feats")
+
+if has_groups or has_polys_only:
     st.divider()
     if st.button("Export GeoJSON", type="secondary", width="stretch"):
         output_dir = Path("output")
         exported_files = []
-        groups = st.session_state["groups"]
 
-        # Fetch formation polygons for all groups
-        with st.spinner("Fetching formation polygons (this may take a minute)..."):
-            matched_polys = fetch_polygons_for_groups(groups)
-        total_polys = sum(len(v) for v in matched_polys.values())
-        st.info(f"Formation polygons: {total_polys} polygons across {len(matched_polys)} groups")
-
-        progress = st.progress(0, text="Exporting GeoJSON files...")
-        total = len(groups)
-        for i, ((stage, unit_name), occs) in enumerate(sorted(groups.items())):
-            path = export_geojson(occs, stage, unit_name, output_dir=output_dir)
-            if path:
-                exported_files.append(path)
-            poly_feats = matched_polys.get((stage, unit_name), [])
-            if poly_feats:
+        if has_polys_only:
+            # Polygons-only export: single file with all polygons
+            with st.spinner("Exporting polygons..."):
                 poly_path = export_polygon_geojson(
-                    poly_feats, stage, unit_name, bbox, output_dir=output_dir)
+                    has_polys_only, "all", "formations", bbox, output_dir=output_dir)
                 if poly_path:
                     exported_files.append(poly_path)
-            progress.progress((i + 1) / total)
-        progress.empty()
+
+        else:
+            groups = st.session_state["groups"]
+
+            # Fetch formation polygons for all groups
+            with st.spinner("Fetching formation polygons (this may take a minute)..."):
+                matched_polys = fetch_polygons_for_groups(groups)
+            total_polys = sum(len(v) for v in matched_polys.values())
+            st.info(f"Formation polygons: {total_polys} polygons across {len(matched_polys)} groups")
+
+            progress = st.progress(0, text="Exporting GeoJSON files...")
+            total = len(groups)
+            for i, ((stage, unit_name), occs) in enumerate(sorted(groups.items())):
+                path = export_geojson(occs, stage, unit_name, output_dir=output_dir)
+                if path:
+                    exported_files.append(path)
+                poly_feats = matched_polys.get((stage, unit_name), [])
+                if poly_feats:
+                    poly_path = export_polygon_geojson(
+                        poly_feats, stage, unit_name, bbox, output_dir=output_dir)
+                    if poly_path:
+                        exported_files.append(poly_path)
+                progress.progress((i + 1) / total)
+            progress.empty()
 
         st.success(f"Exported {len(exported_files)} GeoJSON files to `output/`")
 
@@ -251,10 +281,12 @@ if "groups" in st.session_state and st.session_state["groups"]:
                 )
 
 # ── Clear ─────────────────────────────────────────────────────────────────
-if "groups" in st.session_state or list(Path("output").glob("*.geojson")):
+has_results = ("groups" in st.session_state or "polygon_feats" in st.session_state
+               or list(Path("output").glob("*.geojson")))
+if has_results:
     st.divider()
     if st.button("Clear Results & Delete Output Files", type="secondary", width="stretch"):
-        for key in ("groups", "occurrences", "preview_file"):
+        for key in ("groups", "occurrences", "polygon_feats", "preview_file"):
             st.session_state.pop(key, None)
         output_dir = Path("output")
         removed = 0
@@ -268,11 +300,18 @@ if "groups" in st.session_state or list(Path("output").glob("*.geojson")):
 output_dir = Path("output")
 geojson_files = sorted(output_dir.glob("*.geojson")) if output_dir.exists() else []
 
-# Show only point files (or legacy files without _points/_polygons suffix) in the selector
-preview_options = [
-    f for f in geojson_files
-    if f.stem.endswith("_points") or not (f.stem.endswith("_points") or f.stem.endswith("_polygons"))
-]
+# Show point files, polygon-only files (without a matching _points), and legacy files
+preview_options = []
+for f in geojson_files:
+    if f.stem.endswith("_points"):
+        preview_options.append(f)
+    elif f.stem.endswith("_polygons"):
+        # Include polygon files that have no matching points file
+        points_pair = f.with_name(f.stem.replace("_polygons", "_points") + ".geojson")
+        if not points_pair.exists():
+            preview_options.append(f)
+    else:
+        preview_options.append(f)
 
 if preview_options:
     st.divider()
@@ -294,10 +333,13 @@ if preview_options:
             with open(preview_path, "r") as f:
                 geojson_data = json.load(f)
 
-            # Find the matching polygon file
+            is_points_file = preview_path.stem.endswith("_points")
+            is_polygon_file = preview_path.stem.endswith("_polygons")
+
+            # Find the matching polygon file for point files
             poly_path = None
             poly_data = None
-            if preview_path.stem.endswith("_points"):
+            if is_points_file:
                 poly_path = preview_path.with_name(
                     preview_path.stem.replace("_points", "_polygons") + ".geojson"
                 )
@@ -305,13 +347,23 @@ if preview_options:
                     with open(poly_path, "r") as f:
                         poly_data = json.load(f)
 
-            # Compute map center from point features
+            # Compute map center
             lats, lngs = [], []
             for feat in geojson_data.get("features", []):
-                coords = feat.get("geometry", {}).get("coordinates")
-                if coords and len(coords) >= 2:
+                geom = feat.get("geometry", {})
+                geom_type = geom.get("type", "")
+                coords = geom.get("coordinates")
+                if not coords:
+                    continue
+                if geom_type == "Point" and len(coords) >= 2:
                     lngs.append(coords[0])
                     lats.append(coords[1])
+                elif geom_type in ("Polygon", "MultiPolygon"):
+                    # Use centroid approximation from first coordinate ring
+                    ring = coords[0] if geom_type == "Polygon" else coords[0][0]
+                    if ring:
+                        lngs.extend(c[0] for c in ring)
+                        lats.extend(c[1] for c in ring)
 
             if lats and lngs:
                 map_center = [sum(lats) / len(lats), sum(lngs) / len(lngs)]
@@ -320,10 +372,11 @@ if preview_options:
 
             preview = folium.Map(location=map_center, zoom_start=6)
 
-            # Add polygon layer first (underneath points)
-            if poly_data:
+            # Render polygon data (either standalone or as companion to points)
+            polygon_source = poly_data if poly_data else (geojson_data if is_polygon_file else None)
+            if polygon_source:
                 folium.GeoJson(
-                    poly_data,
+                    polygon_source,
                     name="Formation polygons",
                     style_function=lambda feat: {
                         "fillColor": feat.get("properties", {}).get("color", "#3388ff"),
@@ -337,26 +390,35 @@ if preview_options:
                     ),
                 ).add_to(preview)
 
-            # Add point layer on top
-            folium.GeoJson(
-                geojson_data,
-                name="Occurrences",
-                popup=folium.GeoJsonPopup(
-                    fields=["accepted_name", "stage", "unit_name"],
-                    aliases=["Name", "Stage", "Unit"],
-                ),
-                marker=folium.CircleMarker(
-                    radius=5,
-                    fill=True,
-                    fill_opacity=0.7,
-                    color="#e6194b",
-                ),
-            ).add_to(preview)
+            # Add point layer on top (only for point files)
+            if is_points_file or not is_polygon_file:
+                if not is_polygon_file:
+                    folium.GeoJson(
+                        geojson_data,
+                        name="Occurrences",
+                        popup=folium.GeoJsonPopup(
+                            fields=["accepted_name", "stage", "unit_name"],
+                            aliases=["Name", "Stage", "Unit"],
+                        ),
+                        marker=folium.CircleMarker(
+                            radius=5,
+                            fill=True,
+                            fill_opacity=0.7,
+                            color="#e6194b",
+                        ),
+                    ).add_to(preview)
 
             folium.LayerControl().add_to(preview)
 
-            caption_parts = [f"**{preview_path.name}** ({len(geojson_data.get('features', []))} points)"]
+            caption_parts = []
+            if is_polygon_file and not poly_data:
+                caption_parts.append(
+                    f"**{preview_path.name}** ({len(geojson_data.get('features', []))} polygons)")
+            else:
+                caption_parts.append(
+                    f"**{preview_path.name}** ({len(geojson_data.get('features', []))} points)")
             if poly_data:
-                caption_parts.append(f"**{poly_path.name}** ({len(poly_data.get('features', []))} polygons)")
+                caption_parts.append(
+                    f"**{poly_path.name}** ({len(poly_data.get('features', []))} polygons)")
             st.caption("Previewing: " + " + ".join(caption_parts))
             st_folium(preview, height=500, width=None, key="geojson_preview_map")
