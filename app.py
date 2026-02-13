@@ -1,4 +1,5 @@
 import io
+import json
 import zipfile
 from pathlib import Path
 
@@ -110,7 +111,7 @@ with st.sidebar:
     taxa_input = st.text_area("Comma-separated taxa", value="Dinosauria", height=80)
 
     st.divider()
-    fetch_btn = st.button("Fetch Data", type="primary", use_container_width=True)
+    fetch_btn = st.button("Fetch Data", type="primary", width="stretch")
 
 # ── Main area ───────────────────────────────────────────────────────────────
 bbox = {"latmin": lat_min, "latmax": lat_max, "lngmin": lng_min, "lngmax": lng_max}
@@ -143,7 +144,7 @@ if fetch_btn:
     summary_rows = []
     for (stage, unit_name), occs in sorted(groups.items()):
         summary_rows.append({"Stage": stage, "Unit": unit_name, "Occurrences": len(occs)})
-    st.dataframe(summary_rows, use_container_width=True)
+    st.dataframe(summary_rows, width="stretch")
 
     # Preview map
     st.subheader("Occurrence Map")
@@ -186,7 +187,7 @@ if fetch_btn:
 # ── Export ──────────────────────────────────────────────────────────────────
 if "groups" in st.session_state and st.session_state["groups"]:
     st.divider()
-    if st.button("Export GeoJSON", type="secondary", use_container_width=True):
+    if st.button("Export GeoJSON", type="secondary", width="stretch"):
         output_dir = Path("output")
         exported_files = []
         groups = st.session_state["groups"]
@@ -225,3 +226,59 @@ if "groups" in st.session_state and st.session_state["groups"]:
                     mime="application/geo+json",
                     key=f"dl_{fp.name}",
                 )
+
+# ── GeoJSON Preview ───────────────────────────────────────────────────────
+output_dir = Path("output")
+geojson_files = sorted(output_dir.glob("*.geojson")) if output_dir.exists() else []
+
+if geojson_files:
+    st.divider()
+    st.subheader("Preview GeoJSON")
+
+    selected_file = st.selectbox(
+        "Select a GeoJSON file",
+        options=geojson_files,
+        format_func=lambda p: p.name,
+        key="geojson_preview_select",
+    )
+
+    if st.button("Preview", type="secondary", key="preview_geojson_btn"):
+        st.session_state["preview_file"] = str(selected_file)
+
+    if "preview_file" in st.session_state:
+        preview_path = Path(st.session_state["preview_file"])
+        if preview_path.exists():
+            with open(preview_path, "r") as f:
+                geojson_data = json.load(f)
+
+            # Compute map center from features
+            lats, lngs = [], []
+            for feat in geojson_data.get("features", []):
+                coords = feat.get("geometry", {}).get("coordinates")
+                if coords and len(coords) >= 2:
+                    lngs.append(coords[0])
+                    lats.append(coords[1])
+
+            if lats and lngs:
+                map_center = [sum(lats) / len(lats), sum(lngs) / len(lngs)]
+            else:
+                map_center = [center_lat, center_lng]
+
+            preview = folium.Map(location=map_center, zoom_start=6)
+            folium.GeoJson(
+                geojson_data,
+                name=preview_path.name,
+                popup=folium.GeoJsonPopup(
+                    fields=["accepted_name", "stage", "unit_name"],
+                    aliases=["Name", "Stage", "Unit"],
+                ),
+                marker=folium.CircleMarker(
+                    radius=5,
+                    fill=True,
+                    fill_opacity=0.7,
+                    color="#e6194b",
+                ),
+            ).add_to(preview)
+
+            st.caption(f"Previewing: **{preview_path.name}** ({len(geojson_data.get('features', []))} features)")
+            st_folium(preview, height=500, width=None, key="geojson_preview_map")
