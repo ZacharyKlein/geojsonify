@@ -1,5 +1,7 @@
 # GeoJSONify Macro|Paleo
 
+[Try it out!](https://geojsonify.streamlit.app)
+
 A Streamlit application for querying fossil occurrence data from [Macrostrat](https://macrostrat.org/) and [PaleobioDB](https://paleobiodb.org/) within a user-defined geographic region and stratigraphic range. Results are correlated by lithostratigraphic unit and exported as ArcGIS-compatible GeoJSON files organized by stage × unit.
 
 ## Features
